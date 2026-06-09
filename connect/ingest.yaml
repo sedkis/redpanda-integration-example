@@ -1,0 +1,75 @@
+# INGEST pipeline — model-free. Drains the Wikipedia SSE firehose, filters hard,
+# projects to a compact record, and lands it on the wiki.edits topic at wire
+# speed. No LLM here on purpose: this side must never block on inference.
+
+input:
+  http_client:
+    url: "https://stream.wikimedia.org/v2/stream/recentchange"
+    verb: GET
+    headers:
+      User-Agent: "redpanda-wiki-pipeline/1.0 (https://github.com/sedkodes)"
+      Accept: "text/event-stream"
+    stream:
+      enabled: true
+      reconnect: true        # re-establish the long-lived SSE connection if dropped
+      scanner:
+        lines: {}            # one message per line (SSE frames arrive line by line)
+
+pipeline:
+  processors:
+    # 1. SSE de-framing. Connect has no native SSE parser by design — the http_client
+    #    input streams raw bytes and you frame them yourself (maintainers closed the
+    #    SSE feature request pointing here). `scanner: lines` is safe for this source
+    #    because Wikipedia emits one single-line `data:` JSON object per event; a
+    #    spec-general SSE stream with multi-line `data:` would need a custom delimiter
+    #    or scanner plugin. Keep `data:` lines, strip the prefix, parse JSON; drop the
+    #    rest (`:ok` heartbeats, event:/id: lines, blanks). Malformed JSON is dropped.
+    - mapping: |
+        root = if content().string().has_prefix("data: ") {
+          content().string().trim_prefix("data: ").parse_json().catch(deleted())
+        } else {
+          deleted()
+        }
+
+    # 2. Cheap pre-filter, NO model. This is the "filter before you spend a token"
+    #    data-sense story: only human edits to article (main) namespace survive.
+    - mapping: |
+        root = match {
+          (this.bot | false)               => deleted(),
+          (this.namespace | -1) != 0       => deleted(),
+          (this.type | "") != "edit"       => deleted(),
+          _                                => this
+        }
+
+    # 3. Drop trivial edits below the byte-delta floor, then project to the compact
+    #    record we actually want on the topic.
+    - mapping: |
+        let delta = (this.length.new | 0) - (this.length.old | 0)
+        root = if $delta.abs() < ${MIN_BYTE_DELTA:50} {
+          deleted()
+        } else {
+          {
+            "rev_new":     this.revision.new,
+            "rev_old":     this.revision.old,
+            "wiki":        this.wiki,
+            "server_name": this.server_name,
+            "title":       this.title,
+            "user_name":   this.user,
+            "is_bot":      this.bot | false,
+            "edit_type":   this.type,
+            "comment":     this.comment | "",
+            "byte_delta":  $delta,
+            "event_time":  this.meta.dt
+          }
+        }
+
+output:
+  redpanda:
+    seed_brokers:
+      - "redpanda:9092"
+    topic: "wiki.edits"
+    key: '${! json("rev_new") }'
+
+logger:
+  level: INFO
+  format: logfmt

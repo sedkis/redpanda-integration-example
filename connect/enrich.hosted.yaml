@@ -1,0 +1,140 @@
+# ENRICH pipeline — HOSTED drop-in variant. Identical topology and agent loop to
+# enrich.yaml; only the model call changes (openai_chat_completion instead of
+# ollama_chat). Use for a fast demo without CPU inference.
+#
+# To use: set OPENAI_API_KEY in .env, then point the connect-enrich service at
+# this file (see the commented line in docker-compose.yml).
+#
+# Note: Redpanda Connect has no native Anthropic processor — Anthropic is only
+# reachable via aws_bedrock_chat. openai_chat_completion is the hosted default.
+
+input:
+  redpanda:
+    seed_brokers:
+      - "redpanda:9092"
+    topics:
+      - "wiki.edits"
+    consumer_group: "enricher"
+
+pipeline:
+  processors:
+    - mapping: |
+        root = this
+        root.label = "unknown"
+        root.confidence = 0.0
+        root.enriched = false
+        root.reasoning = ""
+
+    - branch:
+        request_map: |
+          root = {
+            "title":      this.title,
+            "comment":    this.comment,
+            "byte_delta": this.byte_delta,
+            "edit_type":  this.edit_type
+          }
+        processors:
+          - openai_chat_completion:
+              api_key: "${OPENAI_API_KEY}"
+              model: "${OPENAI_MODEL:gpt-4o-mini}"
+              system_prompt: >-
+                You classify a single Wikipedia edit into exactly one category:
+                vandalism, spam, substantive_edit, minor_edit, revert, other.
+                Reply with ONLY a JSON object, no prose, no markdown:
+                {"label": "<category>", "confidence": <0.0-1.0>, "reasoning": "<one short sentence>"}
+              prompt: |-
+                Title: ${! this.title }
+                Edit summary/comment: ${! this.comment }
+                Byte change: ${! this.byte_delta }
+                Type: ${! this.edit_type }
+              response_format: json
+          - mapping: |
+              let cleaned = content().string().re_replace_all("(?s)^[^{]*({.*}).*$", "$1")
+              root = $cleaned.parse_json().catch({"label":"unknown","confidence":0.0,"reasoning":"unparseable model output"})
+              root.label = (root.label | "unknown").string().lowercase().trim()
+              root.confidence = (root.confidence | 0.0).number().catch(0.0)
+              root.reasoning = (root.reasoning | "").string()
+        result_map: |
+          root.label = this.label
+          root.confidence = this.confidence
+          root.reasoning = this.reasoning
+
+    - switch:
+        - check: 'this.confidence < ${CONFIDENCE_THRESHOLD:0.7} || ["vandalism","spam"].contains(this.label)'
+          processors:
+            - branch:
+                request_map: 'root = this'
+                processors:
+                  - http:
+                      url: 'https://${! this.server_name }/w/api.php?action=compare&fromrev=${! this.rev_old }&torev=${! this.rev_new }&format=json&formatversion=2&prop=diff'
+                      verb: GET
+                      headers:
+                        User-Agent: "redpanda-wiki-pipeline/1.0 (https://github.com/sedky; sedkyaboushamalah@gmail.com)"
+                result_map: |
+                  let parsed = content().string().parse_json().catch({})
+                  root.diff_html = $parsed.compare.body | ""
+
+            - mapping: |
+                root = this
+                root.diff_text = (this.diff_html | "").re_replace_all("<[^>]*>", " ").re_replace_all("\\s+", " ").trim().slice(0, 1500)
+
+            - branch:
+                request_map: |
+                  root = {
+                    "title":     this.title,
+                    "comment":   this.comment,
+                    "diff_text": this.diff_text
+                  }
+                processors:
+                  - openai_chat_completion:
+                      api_key: "${OPENAI_API_KEY}"
+                      model: "${OPENAI_MODEL:gpt-4o-mini}"
+                      system_prompt: >-
+                        You re-examine a Wikipedia edit using its ACTUAL diff text.
+                        Categories: vandalism, spam, substantive_edit, minor_edit,
+                        revert, other. Reply with ONLY a JSON object, no prose:
+                        {"label": "<category>", "confidence": <0.0-1.0>, "reasoning": "<one short sentence>"}
+                      prompt: |-
+                        Title: ${! this.title }
+                        Comment: ${! this.comment }
+                        Actual change (diff text): ${! this.diff_text }
+                      response_format: json
+                  - mapping: |
+                      let cleaned = content().string().re_replace_all("(?s)^[^{]*({.*}).*$", "$1")
+                      root = $cleaned.parse_json().catch({"label":"unknown","confidence":0.0,"reasoning":"unparseable model output"})
+                      root.label = (root.label | "unknown").string().lowercase().trim()
+                      root.confidence = (root.confidence | 0.0).number().catch(0.0)
+                      root.reasoning = (root.reasoning | "").string()
+                result_map: |
+                  root.label = this.label
+                  root.confidence = this.confidence
+                  root.reasoning = this.reasoning
+                  root.enriched = true
+
+output:
+  sql_raw:
+    driver: postgres
+    dsn: "postgres://${POSTGRES_USER:wiki}:${POSTGRES_PASSWORD:wiki}@postgres:5432/${POSTGRES_DB:wiki}?sslmode=disable"
+    query: |
+      INSERT INTO edits
+        (rev_new, rev_old, wiki, server_name, title, user_name, is_bot,
+         edit_type, comment, byte_delta, label, confidence, enriched, reasoning,
+         event_time, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now())
+      ON CONFLICT (rev_new) DO UPDATE SET
+        label      = EXCLUDED.label,
+        confidence = EXCLUDED.confidence,
+        enriched   = EXCLUDED.enriched,
+        reasoning  = EXCLUDED.reasoning,
+        updated_at = now()
+      WHERE EXCLUDED.enriched OR EXCLUDED.confidence >= edits.confidence;
+    args_mapping: |
+      root = [
+        this.rev_new, this.rev_old, this.wiki, this.server_name, this.title,
+        this.user_name, this.is_bot, this.edit_type, this.comment, this.byte_delta,
+        this.label, this.confidence, this.enriched, this.reasoning, this.event_time
+      ]
+
+logger:
+  level: INFO
+  format: logfmt

@@ -1,0 +1,129 @@
+# Wikipedia edit-stream classifier — one-command stack.
+#   cp .env.example .env && docker compose up --build
+#
+# Startup ordering is explicit so it comes up clean:
+#   redpanda (healthy) -> redpanda-init creates the topic
+#   ollama  (healthy) -> model-puller pulls the model
+#   connect-enrich waits for BOTH the topic and the model before starting.
+
+services:
+  # --- Redpanda broker (single node, dev mode) ---
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    command:
+      - redpanda
+      - start
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --mode=dev-container
+      - --smp=1
+      - --default-log-level=warn
+    ports:
+      - "19092:19092"   # kafka API (host access)
+      - "9644:9644"     # admin API
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  # --- Create the topic, then exit ---
+  redpanda-init:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - "rpk topic create wiki.edits --brokers redpanda:9092 -p 1 -r 1 || true"
+    restart: "no"
+
+  # --- Postgres sink (schema auto-loaded on first boot) ---
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wiki}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wiki}
+      POSTGRES_DB: ${POSTGRES_DB:-wiki}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-wiki} -d ${POSTGRES_DB:-wiki}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # --- Local LLM server ---
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  # --- Pull the model into the ollama server, then exit ---
+  model-puller:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "ollama pull ${OLLAMA_MODEL:-llama3.2:3b}"
+    restart: "no"
+
+  # --- INGEST: SSE firehose -> filter/project -> topic (no model) ---
+  connect-ingest:
+    image: docker.redpanda.com/redpandadata/connect:latest
+    depends_on:
+      redpanda-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./connect/ingest.yaml:/connect.yaml:ro
+    command: ["run", "/connect.yaml"]
+    environment:
+      MIN_BYTE_DELTA: ${MIN_BYTE_DELTA:-50}
+    restart: unless-stopped
+
+  # --- ENRICH: topic -> agent loop -> Postgres ---
+  connect-enrich:
+    image: docker.redpanda.com/redpandadata/connect:latest
+    depends_on:
+      redpanda-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      model-puller:
+        condition: service_completed_successfully
+    # For the HOSTED variant, swap the line below to enrich.hosted.yaml and set
+    # OPENAI_API_KEY in .env:
+    #   - ./connect/enrich.hosted.yaml:/connect.yaml:ro
+    volumes:
+      - ./connect/enrich.yaml:/connect.yaml:ro
+    command: ["run", "/connect.yaml"]
+    environment:
+      OLLAMA_SERVER: ${OLLAMA_SERVER:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+      CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.7}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      POSTGRES_USER: ${POSTGRES_USER:-wiki}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wiki}
+      POSTGRES_DB: ${POSTGRES_DB:-wiki}
+    restart: unless-stopped
+
+volumes:
+  ollama-models:
