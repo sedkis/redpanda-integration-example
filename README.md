@@ -1,10 +1,8 @@
 # Wikipedia Content Moderation AI Pipeline
 
-Ingests the live Wikipedia recent-changes firehose, classifies each edit with an
-LLM, and lands clean, queryable records in Postgres — all wired with **Redpanda
-Connect** and brought up with a single `docker compose up`.
+Ingests the live Wikipedia recent-changes firehose, classifies each edit with an LLM, and lands clean, queryable records in Postgres — all wired with **Redpanda Connect** and brought up with a single `docker compose up`.
 
-  ![Pipeline diagram](image.png)
+![Pipeline diagram](image.png)
 
 ## Quickstart
 
@@ -53,7 +51,7 @@ So the work is split into two Connect pipelines joined by a **Redpanda topic**:
 
 3. **Confidence gate** (`switch`). If `confidence < CONFIDENCE_THRESHOLD` **or** the label is `vandalism`/`spam`, run a **second pass**: fetch the actual diff from the MediaWiki `compare` API and re-classify with real content in hand.  This is the multi-step loop, and you can point to exactly where the extra token spend goes and why.
 
-5. **Defend against dirty JSON**, normalize to the label enum, and **UPSERT** into Postgres keyed on the new revision id — so a low-confidence first pass is *corrected* by the enriched second pass instead of duplicated.
+4. **Defend against dirty JSON**, normalize to the label enum, and **UPSERT** into Postgres keyed on the new revision id — so a low-confidence first pass is *corrected* by the enriched second pass instead of duplicated.
 
 ## Tradeoffs
 
@@ -72,35 +70,16 @@ The cost of the async split is operational surface. There is a topic to run, con
 
 ### 2. One classification call vs. a multi-step reasoning loop
 
-**I run a confidence-gated two-pass loop, not one prompt.** The first pass
-classifies on cheap metadata only (title, comment, byte-delta). A `switch` then
-gates: only edits the model was unsure about (`confidence < CONFIDENCE_THRESHOLD`)
-**or** flagged as `vandalism`/`spam` earn a second pass that fetches the *actual*
-diff from the MediaWiki `compare` API and re-classifies with real content in
-hand. The expensive path runs on the minority of edits that justify it, and the
-`enriched` flag records which rows got it.
+**I run a confidence-gated two-pass loop, not one prompt.** The first pass classifies on cheap metadata only (title, comment, byte-delta). A `switch` then gates: only edits the model was unsure about (`confidence < CONFIDENCE_THRESHOLD`) **or** flagged as `vandalism`/`spam` earn a second pass that fetches the *actual* diff from the MediaWiki `compare` API and re-classifies with real content in hand. The expensive path runs on the minority of edits that justify it, and the `enriched` flag records which rows got it.
 
-A single classify call is cheaper, simpler, and has one failure mode instead of
-two. But it's structurally blind to the cases that matter most here: an edit
-whose comment is empty or actively lies ("fixed typo" on a content blanking) is
-exactly where vandalism hides, and metadata alone can't see it. The second pass
-is where the judgment lives — it spends tokens *only* where the first pass admits
+A single classify call is cheaper, simpler, and has one failure mode instead of two. But it's structurally blind to the cases that matter most here: an edit whose comment is empty or actively lies ("fixed typo" on a content blanking) is exactly where vandalism hides, and metadata alone can't see it. The second pass is where the judgment lives — it spends tokens *only* where the first pass admits
 uncertainty or raises a red flag.
 
-**When I'd flip:** drop back to one call if the data were self-describing (a
-source where the summary reliably matches the change), or if the diff-fetch tail
-latency / MediaWiki rate limits outweighed the accuracy gain. I'd go the *other*
-direction — add a third pass or a human-review queue — if false negatives on
-vandalism carried real cost. *(Shaped by the exercise hint that small models
-produce dirty JSON and that "the comment lies"; the second pass is the standard
-"retrieve-then-reason" move applied to MediaWiki's `action=compare` diff API.)*
+**When I'd flip:** drop back to one call if the data were self-describing (a source where the summary reliably matches the change), or if the diff-fetch tail latency / MediaWiki rate limits outweighed the accuracy gain. I'd go the *other* direction — add a third pass or a human-review queue — if false negatives on vandalism carried real cost. 
 
 ### Other decisions, briefly
 
-- **Branch, not mutation, for every model call** — `request_map`/`result_map`
-  graft the answer onto the original message instead of overwriting the payload
-  with the model's raw (often malformed) output. Near-default once you've been
-  burned once.
+- **Branch, not mutation, for every model call** — `request_map`/`result_map` graft the answer onto the original message instead of overwriting the payload with the model's raw (often malformed) output. Near-default once you've been burned once.
 - **Dedup via UPSERT, not a pre-model cache** — the sink UPSERTs on `rev_new`, so
   retries and the two-pass design converge on one row for free; a pre-model cache
   is the obvious next step *if* token cost ever became the binding constraint.
@@ -110,14 +89,15 @@ produce dirty JSON and that "the comment lies"; the second pass is the standard
 
 ## What surprised me
 
-How much of the "agent" turned out to be **plumbing, not prompting.** The prompts
-are a dozen lines; the real work was the defensive scaffolding around them —
-stripping the SSE `data:` prefix, `.catch(deleted())` so one non-JSON heartbeat
-doesn't poison the batch, extracting the first `{...}` block because the 3B model
-fences and prefaces its JSON, seeding `unknown` *before* the call so a cold-start
-failure lands as a row instead of silence, and the UPSERT so a later pass can
-correct an earlier one. The model is the easy part; making the pipeline survive
-the model's bad days is the job.
+Three things I didn't expect going in:
+
+- **The competency of the 3B model at classification.** I budgeted the second pass as a *correctness* crutch for a weak local model — fetch the real diff because the small model can't be trusted on metadata alone. In practice `llama3.2:3b` handles the clear-cut cases (obvious vandalism, plain content edits) reasonably well on title/comment/byte-delta alone — better than I'd assumed a model that small would; the second pass earns its keep on the genuinely ambiguous edits rather than as a blanket safety net. The confidence gate ended up looking less like a workaround and more like the actual design.
+
+- **How much junk is in the raw firehose.** I expected to be classifying *edits*; a lot of what arrives is bots, automated reverts, and outright spam. The `ingest` filter/project step turned out to be doing more real work than the model — without it the enricher would burn most of its inference budget on traffic no moderator would ever look at. The signal-to-noise ratio of the source reshaped where the effort went.
+
+- **How far Grafana got for free.** I added it expecting throughput/lag charts and nothing more. Pointing a second datasource straight at Postgres turned it into the actual *product* surface — the flagged vandalism/spam feed and the live classified-edit table a moderator would watch — with zero bespoke UI. The monitoring tool quietly became the demo.
+
+(The boring fourth surprise: how much of the "agent" is plumbing, not prompting. The prompts are a dozen lines; the defensive scaffolding around them — SSE prefix stripping, first-`{...}` extraction, seeding `unknown` before the call, UPSERT for correction — is the actual job. Expected, but worth stating.)
 
 ## Where this breaks in production / failure modes
 
