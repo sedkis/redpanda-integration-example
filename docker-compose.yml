@@ -30,7 +30,7 @@ services:
       retries: 20
       start_period: 5s
 
-  # --- Create the topic, then exit ---
+  # --- Create the topic + enable consumer-lag metrics, then exit ---
   redpanda-init:
     image: docker.redpanda.com/redpandadata/redpanda:latest
     depends_on:
@@ -38,7 +38,12 @@ services:
         condition: service_healthy
     entrypoint: ["/bin/bash", "-c"]
     command:
-      - "rpk topic create wiki.edits --brokers redpanda:9092 -p 1 -r 1 || true"
+      - |
+        rpk topic create wiki.edits --brokers redpanda:9092 -p 1 -r 1 || true
+        # Consumer-group lag metrics are OFF by default — without this the
+        # `redpanda_kafka_consumer_group_lag_*` series never appear on
+        # /public_metrics and the Grafana lag panel stays empty.
+        rpk cluster config set enable_consumer_group_metrics '[group, partition, consumer_lag]' -X admin.hosts=redpanda:9644 || true
     restart: "no"
 
   # --- Postgres sink (schema auto-loaded on first boot) ---
@@ -123,6 +128,39 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-wiki}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wiki}
       POSTGRES_DB: ${POSTGRES_DB:-wiki}
+    restart: unless-stopped
+
+  # --- Prometheus: scrapes the broker + both Connect pipelines ---
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
+
+  # --- Grafana: auto-provisioned datasource + Wiki Pipeline dashboard ---
+  # Open http://localhost:3000 (anonymous admin, no login) after `up`.
+  grafana:
+    image: grafana/grafana:latest
+    depends_on:
+      prometheus:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      # Consumed by provisioning/datasources/postgres.yml (the content datasource).
+      POSTGRES_USER: ${POSTGRES_USER:-wiki}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wiki}
+      POSTGRES_DB: ${POSTGRES_DB:-wiki}
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     restart: unless-stopped
 
 volumes:

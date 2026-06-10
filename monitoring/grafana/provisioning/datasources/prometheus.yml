@@ -1,0 +1,12 @@
+# Auto-provisioned Prometheus datasource. Fixed uid so the dashboard JSON can
+# reference it deterministically.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

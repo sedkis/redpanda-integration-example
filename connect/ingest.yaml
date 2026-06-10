@@ -70,6 +70,12 @@ output:
     topic: "wiki.edits"
     key: '${! json("rev_new") }'
 
+# Expose Prometheus metrics on the default :4195/metrics endpoint so Prometheus
+# can scrape this side's throughput (output_sent here = events landed on the
+# topic = the pipeline's *arrival* rate).
+metrics:
+  prometheus: {}
+
 logger:
   level: INFO
   format: logfmt

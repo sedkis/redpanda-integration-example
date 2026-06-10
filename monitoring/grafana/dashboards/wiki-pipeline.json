@@ -1,0 +1,325 @@
+{
+  "uid": "wiki-pipeline",
+  "title": "Wiki Pipeline",
+  "tags": ["redpanda", "wiki"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Consumer lag (enricher backlog)",
+      "description": "Total un-consumed messages on wiki.edits for the 'enricher' group. A steadily rising number means enrich cannot keep up with ingest.",
+      "gridPos": { "h": 5, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(redpanda_kafka_consumer_group_lag_sum{redpanda_group=\"enricher\"})",
+          "legendFormat": "lag"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 100 },
+              { "color": "red", "value": 1000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Under-replicated partitions",
+      "description": "Broker health. Should be 0 on a healthy single-node dev cluster.",
+      "gridPos": { "h": 5, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(redpanda_kafka_under_replicated_replicas)",
+          "legendFormat": "under-replicated"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Arrival vs drain rate (events/sec)",
+      "description": "The headline. Arrival = events ingest lands on the topic. Drain = events enrich pulls off the topic. If drain sits below arrival for a sustained period, the backlog grows without bound.",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(output_sent{job=\"connect-ingest\"}[1m]))",
+          "legendFormat": "arrival (ingest → topic)"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(input_received{job=\"connect-enrich\"}[1m]))",
+          "legendFormat": "drain (enrich ← topic)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Consumer lag over time",
+      "description": "redpanda_kafka_consumer_group_lag_sum for the enricher group. Flat/near-zero = keeping up. Trending up = falling behind.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(redpanda_kafka_consumer_group_lag_sum{redpanda_group=\"enricher\"})",
+          "legendFormat": "lag"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single", "sort": "none" }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Enrich activity (events/sec)",
+      "description": "What the LLM worker is doing: messages consumed, rows written to Postgres, and errors.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(input_received{job=\"connect-enrich\"}[1m]))",
+          "legendFormat": "consumed"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(output_sent{job=\"connect-enrich\"}[1m]))",
+          "legendFormat": "written to postgres"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(output_error{job=\"connect-enrich\"}[1m]))",
+          "legendFormat": "errors"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "errors" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Broker throughput (bytes/sec)",
+      "description": "Kafka API bytes in/out at the broker, split by request type.",
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (redpanda_request) (rate(redpanda_kafka_request_bytes_total[1m]))",
+          "legendFormat": "{{redpanda_request}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "id": 7,
+      "type": "row",
+      "title": "Classified content (from Postgres)",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 },
+      "panels": []
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Label distribution",
+      "description": "Count, average confidence, and how many rows earned the diff-fetch second pass, per label. The 'actionable output' view (edit_label_summary).",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 30 },
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT label, edits, avg_confidence, second_pass_count FROM edit_label_summary;"
+        }
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "showHeader": true, "cellHeight": "sm" }
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Flagged feed — vandalism / spam (what a moderator watches)",
+      "description": "The high-signal feed (recent_flagged view): only edits classified vandalism or spam, newest first. Often sparse — that's the point.",
+      "gridPos": { "h": 7, "w": 16, "x": 8, "y": 30 },
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT event_time, wiki, title, user_name, label, confidence, byte_delta, comment FROM recent_flagged ORDER BY event_time DESC LIMIT 100;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "confidence" },
+            "properties": [{ "id": "unit", "value": "percentunit" }]
+          }
+        ]
+      },
+      "options": { "showHeader": true, "cellHeight": "sm" }
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Recent classified edits (all labels)",
+      "description": "Every classified edit, newest first — so the dashboard always shows live content even when nothing is flagged. enriched=true means the diff-fetch second pass ran.",
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 37 },
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT updated_at, title, label, confidence, enriched, byte_delta, user_name, comment FROM edits ORDER BY updated_at DESC LIMIT 100;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "confidence" },
+            "properties": [{ "id": "unit", "value": "percentunit" }]
+          }
+        ]
+      },
+      "options": { "showHeader": true, "cellHeight": "sm" }
+    }
+  ]
+}

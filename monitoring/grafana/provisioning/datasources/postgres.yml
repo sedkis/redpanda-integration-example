@@ -1,0 +1,21 @@
+# Auto-provisioned Postgres datasource — lets Grafana show the *content* the
+# pipeline produces (classified edits), not just the Prometheus throughput/lag
+# metrics. Fixed uid so the dashboard JSON can reference it deterministically.
+# Credentials come from the grafana service's environment (see docker-compose),
+# which defaults them to the same wiki/wiki the rest of the stack uses.
+apiVersion: 1
+
+datasources:
+  - name: Postgres
+    uid: postgres
+    type: postgres
+    access: proxy
+    url: postgres:5432
+    user: ${POSTGRES_USER}
+    jsonData:
+      database: ${POSTGRES_DB}
+      sslmode: disable
+      postgresVersion: 1600
+    secureJsonData:
+      password: ${POSTGRES_PASSWORD}
+    editable: false

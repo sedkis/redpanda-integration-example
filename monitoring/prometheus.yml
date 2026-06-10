@@ -1,0 +1,25 @@
+# Scrape config for the wiki pipeline.
+#   - redpanda:        broker + consumer-group lag (curated /public_metrics)
+#   - connect-ingest:  arrival rate (output_sent = events landed on the topic)
+#   - connect-enrich:  drain rate  (input_received = events pulled off the topic)
+# Separate jobs mean Prometheus tags each series with job="connect-ingest" vs
+# job="connect-enrich", so no per-component labels are needed in the pipelines.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: redpanda
+    metrics_path: /public_metrics
+    static_configs:
+      - targets: ["redpanda:9644"]
+
+  - job_name: connect-ingest
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["connect-ingest:4195"]
+
+  - job_name: connect-enrich
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["connect-enrich:4195"]

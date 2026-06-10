@@ -1,3 +1,4 @@
 .env
 *.log
 CRASH-COURSE.md
+.nwave*

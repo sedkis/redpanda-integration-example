@@ -156,6 +156,12 @@ output:
         this.event_time
       ]
 
+# Expose Prometheus metrics on the default :4195/metrics endpoint. On this side,
+# input_received = events pulled off the topic = the pipeline's *drain* rate.
+# Compare against ingest's arrival rate to see whether enrich is keeping up.
+metrics:
+  prometheus: {}
+
 logger:
   level: INFO
   format: logfmt
