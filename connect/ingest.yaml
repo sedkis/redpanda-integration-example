@@ -1,6 +1,6 @@
-# INGEST pipeline — model-free. Drains the Wikipedia SSE firehose, filters hard,
-# projects to a compact record, and lands it on the wiki.edits topic at wire
-# speed. No LLM here on purpose: this side must never block on inference.
+# INGEST pipeline — model-free. Drains the Wikipedia SSE firehose, filters hard on
+# SCOPE (not on size), projects to a compact record, and lands it on the wiki.edits
+# topic at wire speed. No LLM here on purpose: this side must never block on inference.
 
 input:
   http_client:
@@ -31,8 +31,12 @@ pipeline:
           deleted()
         }
 
-    # 2. Cheap pre-filter, NO model. This is the "filter before you spend a token"
-    #    data-sense story: only human edits to article (main) namespace survive.
+    # 2. SCOPE filter, NO model and NO size threshold. We drop only what is out of
+    #    scope for the problem — bots, non-article namespaces, non-edits — never
+    #    things that are merely SMALL. A byte-size floor here would silently delete
+    #    byte-neutral vandalism (a date digit-swap 1897 -> 1107 is 0 bytes), which is
+    #    exactly the class this system exists to catch. Triviality is the MODEL's call
+    #    (a "fixed spacing" diff -> minor_edit), not a threshold's.
     - mapping: |
         root = match {
           (this.bot | false)               => deleted(),
@@ -41,26 +45,50 @@ pipeline:
           _                                => this
         }
 
-    # 3. Drop trivial edits below the byte-delta floor, then project to the compact
-    #    record we actually want on the topic.
+    # 3. Project to the compact record we put on the topic. Carry the UNFORGEABLE
+    #    trust signals the classifier and gate need (is_anon, byte_delta, byte_neutral)
+    #    — "who made the edit" is the single most predictive cheap feature, and it is
+    #    free in the event we already parse. `comment` rides along but is marked
+    #    untrusted downstream; it is never a verdict-bearing feature.
     - mapping: |
         let delta = (this.length.new | 0) - (this.length.old | 0)
-        root = if $delta.abs() < ${MIN_BYTE_DELTA:50} {
+        let user  = this.user | ""
+        # is_anon (below) is derived from these. IPv4 with every octet bounded 0-255;
+        # IPv6 as >=2 colon-separated hextets or a compressed "::". Bounding both stops
+        # a registered name like "Ab:Cd" or a bogus "999.999.999.999" being mis-read as
+        # anonymous — a value the gate and the stored row treat as an unforgeable signal.
+        let ipv4  = $user.re_match("^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$")
+        let ipv6  = $user.re_match("^[0-9A-Fa-f:]+$") && ($user.contains("::") || $user.re_match("^([0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{1,4}$"))
+        root = {
+          "rev_new":        this.revision.new,
+          "rev_old":        this.revision.old,
+          "wiki":           this.wiki,
+          "server_name":    this.server_name,
+          "title":          this.title,
+          "user_name":      $user,
+          "is_bot":         this.bot | false,
+          # MediaWiki attributes edits made without logging in to the editor's raw
+          # IP address — so an IP-shaped `user` deterministically *is* an anonymous
+          # edit. The editor can't spoof this; we derive it here, they don't supply it.
+          # (Both patterns are bounded above so near-IP usernames aren't mis-flagged.)
+          "is_anon":        $ipv4 || $ipv6,
+          "edit_type":      this.type,
+          "comment":        this.comment | "",
+          "byte_delta":     $delta,
+          "byte_neutral":   $delta == 0,
+          "event_time":     this.meta.dt,
+          "schema_version": 1
+        }
+
+    # 4. Data-contract guard: rev_new keys the topic and server_name builds the diff
+    #    URL downstream — a record missing either is uncompareable, so drop it at the
+    #    edge instead of discovering it mid-enrich. (A missing rev_old is tolerated:
+    #    the enricher marks it diff_unavailable rather than classifying blind.)
+    - mapping: |
+        root = if (this.rev_new | null) == null || (this.server_name | "") == "" {
           deleted()
         } else {
-          {
-            "rev_new":     this.revision.new,
-            "rev_old":     this.revision.old,
-            "wiki":        this.wiki,
-            "server_name": this.server_name,
-            "title":       this.title,
-            "user_name":   this.user,
-            "is_bot":      this.bot | false,
-            "edit_type":   this.type,
-            "comment":     this.comment | "",
-            "byte_delta":  $delta,
-            "event_time":  this.meta.dt
-          }
+          this
         }
 
 output:

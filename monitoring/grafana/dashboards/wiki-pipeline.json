@@ -249,7 +249,7 @@
       "id": 8,
       "type": "table",
       "title": "Label distribution",
-      "description": "Count, average confidence, and how many rows earned the diff-fetch second pass, per label. The 'actionable output' view (edit_label_summary).",
+      "description": "Count, average confidence, and how many rows the classifier produced a verdict for, per label. The 'actionable output' view (edit_label_summary).",
       "gridPos": { "h": 7, "w": 8, "x": 0, "y": 30 },
       "datasource": { "type": "postgres", "uid": "postgres" },
       "targets": [
@@ -259,7 +259,7 @@
           "format": "table",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "SELECT label, edits, avg_confidence, second_pass_count FROM edit_label_summary;"
+          "rawSql": "SELECT label, edits, avg_confidence, classified_count FROM edit_label_summary;"
         }
       ],
       "fieldConfig": { "defaults": {}, "overrides": [] },
@@ -268,8 +268,8 @@
     {
       "id": 9,
       "type": "table",
-      "title": "Flagged feed — vandalism / spam (what a moderator watches)",
-      "description": "The high-signal feed (recent_flagged view): only edits classified vandalism or spam, newest first. Often sparse — that's the point.",
+      "title": "Action queue — act now (recent_action)",
+      "description": "The auto_flag band (recent_action view): rule-caught, or a confident classified vandalism/spam verdict — what a bot or fast-acting moderator treats as actionable now. rule_hit shows which deterministic tripwire fired.",
       "gridPos": { "h": 7, "w": 16, "x": 8, "y": 30 },
       "datasource": { "type": "postgres", "uid": "postgres" },
       "targets": [
@@ -279,7 +279,7 @@
           "format": "table",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "SELECT event_time, wiki, title, user_name, label, confidence, byte_delta, comment FROM recent_flagged ORDER BY event_time DESC LIMIT 100;"
+          "rawSql": "SELECT event_time, wiki, title, user_name, is_anon, label, confidence, rule_hit, byte_delta, comment, reasoning, diff_url, 'view diff' AS diff FROM recent_action;"
         }
       ],
       "fieldConfig": {
@@ -288,6 +288,50 @@
           {
             "matcher": { "id": "byName", "options": "confidence" },
             "properties": [{ "id": "unit", "value": "percentunit" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "diff" },
+            "properties": [{ "id": "links", "value": [{ "title": "Open the rendered diff on the source wiki", "url": "${__data.fields.diff_url}", "targetBlank": true }] }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "diff_url" },
+            "properties": [{ "id": "custom.hidden", "value": true }]
+          }
+        ]
+      },
+      "options": { "showHeader": true, "cellHeight": "sm" }
+    },
+    {
+      "id": 13,
+      "type": "table",
+      "title": "Review queue — needs a human (recent_review)",
+      "description": "The needs_review band (recent_review view): anything suspicious a human should look at. Deliberate-deception edits — comment_diff_mismatch, where the editor's summary lies about the diff — sort to the TOP regardless of confidence. status flags rows that could not be classified (api_error / diff_unavailable / unclassified).",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 37 },
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT event_time, wiki, title, user_name, is_anon, label, confidence, comment_diff_mismatch, status, byte_delta, comment, reasoning, diff_url, 'view diff' AS diff FROM recent_review;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "confidence" },
+            "properties": [{ "id": "unit", "value": "percentunit" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "diff" },
+            "properties": [{ "id": "links", "value": [{ "title": "Open the rendered diff on the source wiki", "url": "${__data.fields.diff_url}", "targetBlank": true }] }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "diff_url" },
+            "properties": [{ "id": "custom.hidden", "value": true }]
           }
         ]
       },
@@ -297,8 +341,8 @@
       "id": 10,
       "type": "table",
       "title": "Recent classified edits (all labels)",
-      "description": "Every classified edit, newest first — so the dashboard always shows live content even when nothing is flagged. enriched=true means the diff-fetch second pass ran.",
-      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 37 },
+      "description": "Every classified edit, newest first — so the dashboard always shows live content even when nothing is flagged. enriched=true means the classifier produced a verdict (vs a seeded/unclassified row).",
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 46 },
       "datasource": { "type": "postgres", "uid": "postgres" },
       "targets": [
         {
@@ -307,7 +351,7 @@
           "format": "table",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "SELECT updated_at, title, label, confidence, enriched, byte_delta, user_name, comment FROM edits ORDER BY updated_at DESC LIMIT 100;"
+          "rawSql": "SELECT updated_at, title, label, confidence, enriched, byte_delta, user_name, comment, reasoning, 'https://' || server_name || '/w/index.php?diff=prev&oldid=' || rev_new AS diff_url, 'view diff' AS diff FROM edits ORDER BY updated_at DESC LIMIT 100;"
         }
       ],
       "fieldConfig": {
@@ -316,6 +360,58 @@
           {
             "matcher": { "id": "byName", "options": "confidence" },
             "properties": [{ "id": "unit", "value": "percentunit" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "diff" },
+            "properties": [{ "id": "links", "value": [{ "title": "Open the rendered diff on the source wiki", "url": "${__data.fields.diff_url}", "targetBlank": true }] }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "diff_url" },
+            "properties": [{ "id": "custom.hidden", "value": true }]
+          }
+        ]
+      },
+      "options": { "showHeader": true, "cellHeight": "sm" }
+    },
+    {
+      "id": 11,
+      "type": "row",
+      "title": "Diagnostics — model QA",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 57 },
+      "panels": []
+    },
+    {
+      "id": 12,
+      "type": "table",
+      "title": "Label anomalies — LLM emitted an out-of-taxonomy label (coerced to unknown)",
+      "description": "Diagnostic feed (label_anomalies view): rows where the model returned a label outside our six categories. raw_label is what it actually said — use it to spot prompt/model drift. An empty table is the healthy state.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 58 },
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT event_time, wiki, title, raw_label, label, confidence, model_version, reasoning, diff_url, 'view diff' AS diff FROM label_anomalies ORDER BY event_time DESC LIMIT 100;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "confidence" },
+            "properties": [{ "id": "unit", "value": "percentunit" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "diff" },
+            "properties": [{ "id": "links", "value": [{ "title": "Open the rendered diff on the source wiki", "url": "${__data.fields.diff_url}", "targetBlank": true }] }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "diff_url" },
+            "properties": [{ "id": "custom.hidden", "value": true }]
           }
         ]
       },

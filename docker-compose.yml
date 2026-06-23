@@ -9,7 +9,7 @@
 services:
   # --- Redpanda broker (single node, dev mode) ---
   redpanda:
-    image: docker.redpanda.com/redpandadata/redpanda:latest
+    image: docker.redpanda.com/redpandadata/redpanda:v26.1.10
     command:
       - redpanda
       - start
@@ -32,7 +32,7 @@ services:
 
   # --- Create the topic + enable consumer-lag metrics, then exit ---
   redpanda-init:
-    image: docker.redpanda.com/redpandadata/redpanda:latest
+    image: docker.redpanda.com/redpandadata/redpanda:v26.1.10
     depends_on:
       redpanda:
         condition: service_healthy
@@ -48,7 +48,7 @@ services:
 
   # --- Postgres sink (schema auto-loaded on first boot) ---
   postgres:
-    image: postgres:16
+    image: postgres:16.14
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-wiki}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wiki}
@@ -65,7 +65,7 @@ services:
 
   # --- Local LLM server ---
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.30.10
     ports:
       - "11434:11434"
     volumes:
@@ -77,9 +77,9 @@ services:
       retries: 30
       start_period: 5s
 
-  # --- Pull the model into the ollama server, then exit ---
+  # --- Pull the classifier model into ollama, then exit ---
   model-puller:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.30.10
     depends_on:
       ollama:
         condition: service_healthy
@@ -92,20 +92,18 @@ services:
 
   # --- INGEST: SSE firehose -> filter/project -> topic (no model) ---
   connect-ingest:
-    image: docker.redpanda.com/redpandadata/connect:latest
+    image: docker.redpanda.com/redpandadata/connect:4.97.0
     depends_on:
       redpanda-init:
         condition: service_completed_successfully
     volumes:
       - ./connect/ingest.yaml:/connect.yaml:ro
     command: ["run", "/connect.yaml"]
-    environment:
-      MIN_BYTE_DELTA: ${MIN_BYTE_DELTA:-50}
     restart: unless-stopped
 
   # --- ENRICH: topic -> agent loop -> Postgres ---
   connect-enrich:
-    image: docker.redpanda.com/redpandadata/connect:latest
+    image: docker.redpanda.com/redpandadata/connect:4.97.0
     depends_on:
       redpanda-init:
         condition: service_completed_successfully
@@ -113,18 +111,12 @@ services:
         condition: service_healthy
       model-puller:
         condition: service_completed_successfully
-    # For the HOSTED variant, swap the line below to enrich.hosted.yaml and set
-    # OPENAI_API_KEY in .env:
-    #   - ./connect/enrich.hosted.yaml:/connect.yaml:ro
     volumes:
       - ./connect/enrich.yaml:/connect.yaml:ro
     command: ["run", "/connect.yaml"]
     environment:
       OLLAMA_SERVER: ${OLLAMA_SERVER:-http://ollama:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
-      CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.7}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}   # the classifier model (LLM stand-in)
       POSTGRES_USER: ${POSTGRES_USER:-wiki}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wiki}
       POSTGRES_DB: ${POSTGRES_DB:-wiki}
@@ -132,7 +124,7 @@ services:
 
   # --- Prometheus: scrapes the broker + both Connect pipelines ---
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.5.4
     ports:
       - "9090:9090"
     volumes:
@@ -142,14 +134,14 @@ services:
   # --- Grafana: auto-provisioned datasource + Wiki Pipeline dashboard ---
   # Open http://localhost:3000 (anonymous admin, no login) after `up`.
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.0.2
     depends_on:
       prometheus:
         condition: service_started
       postgres:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      - "${GRAFANA_PORT:-3000}:3000"   # 3000 collides with most JS dev servers; override in .env
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
